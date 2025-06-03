@@ -1,7 +1,7 @@
 import logging
 import os
 import time
-from ctypes import POINTER, byref, cast, create_string_buffer, sizeof
+from ctypes import POINTER, byref, c_ubyte, cast, create_string_buffer, sizeof
 from ctypes import (
     Structure,
     WinDLL,
@@ -13,7 +13,7 @@ from ctypes import (
     c_void_p,
 )
 from enum import IntEnum
-from typing import Type
+from typing import Type, Union
 
 
 class EncryptedAppTicketResponse_t(Structure):
@@ -30,7 +30,7 @@ class EResult(IntEnum):
 
 
 class SteamAppTicket:
-    def __init__(self, app_id: str = "", dll_path: str = ""):
+    def __init__(self, app_id: Union[str, int] = "", dll_path: str = ""):
         self.dll_path = dll_path or os.path.join(os.getcwd(), "steam_api64.dll")
         self.api: WinDLL
         self.h_user = None
@@ -40,14 +40,9 @@ class SteamAppTicket:
         self.interface_ver = b"SteamUser023"
         self.used_app_id = False
         self.ticket_requested = False
-
+        
         if app_id:
-            try:
-                with open("steam_appid.txt", "w") as f:
-                    f.write(app_id)
-                self.used_app_id = True
-            except Exception:
-                raise ValueError("Couldn't generate App Id. If steam_appid is open, please close it.")
+            os.environ["SteamAppId"] = str(app_id)
 
         self.init = False
 
@@ -157,13 +152,19 @@ class SteamAppTicket:
         self.api.SteamAPI_ISteamFriends_GetPersonaName.argtypes = [c_void_p]
         self.api.SteamAPI_ISteamFriends_GetPersonaName.restype = c_char_p
 
-    def get_steam_id(self):
+        self.api.SteamAPI_ISteamUser_GetAuthSessionTicket.argtypes = [
+            c_void_p,
+            c_void_p,
+            c_int,
+            POINTER(c_uint32),
+        ]
+        self.api.SteamAPI_ISteamUser_GetAuthSessionTicket.restype = c_uint32
+
+    def get_steam_id(self) -> int:
         return self.api.SteamAPI_ISteamUser_GetSteamID(self.user)
 
-    def get_steam_name(self):
-        return self.api.SteamAPI_ISteamFriends_GetPersonaName(self.friends).decode(
-            "utf-8"
-        )
+    def get_steam_name(self) -> str:
+        return self.api.SteamAPI_ISteamFriends_GetPersonaName(self.friends).decode("utf-8")
 
     def get_encrypted_app_ticket(self,):  
         if not self.init:
@@ -204,16 +205,29 @@ class SteamAppTicket:
         logging.getLogger("SteamAppTicket").info("Ticket Received")
         self.ticket_requested = True
 
-    def request_encrypted_app_ticket(self, data: bytes = b""):
+    def request_encrypted_app_ticket(self, data: bytes = b"") -> int:
         if not self.init:
             raise ValueError(f"Please initialize the client first!")
-        return self.api.SteamAPI_ISteamUser_RequestEncryptedAppTicket(
-            self.user, cast(c_char_p(data), c_void_p), len(data)
+        return self.api.SteamAPI_ISteamUser_RequestEncryptedAppTicket(self.user, cast(c_char_p(data), c_void_p), len(data))
+
+    def get_auth_session_ticket(self):
+        buf_size = 2048
+        buffer = create_string_buffer(buf_size)
+        ticket_size = c_uint32()
+
+        ticket_handle = self.api.SteamAPI_ISteamUser_GetAuthSessionTicket(
+            self.user,
+            buffer,
+            buf_size,
+            byref(ticket_size),
         )
 
-    def wait_for_call_result(
-        self, call_id, callback_type: Type[Structure], struct_size=32, poll_interval=0.5
-    ):
+        if ticket_handle == 0 or ticket_size.value == 0:
+            raise RuntimeError("GetAuthSessionTicket failed")
+
+        return buffer.raw[: ticket_size.value]
+
+    def wait_for_call_result(self, call_id, callback_type: Type[Structure], struct_size=32, poll_interval=0.5):
         if not self.init:
             raise ValueError(f"Please initialize the client first!")
         io_failure = c_bool(False)
@@ -258,6 +272,113 @@ class SteamAppTicket:
             except Exception:
                 pass
 
+class SteamTicketDecryptor:
+    def __init__(self, app_id: Union[str, int] = "", dll_path: str = "", key = b""):
+        self.dll_path = dll_path or os.path.join(
+            os.getcwd(), "sdkencryptedappticket64.dll"
+        )
+        self.app_id = str(app_id)
+        self.key = key
+        self.api: WinDLL
+        self._load_dll()
+        self._define_functions()
+        if len(self.key) != 32:
+            raise ValueError("Symmetric key must be 32 bytes long")
+
+    def _load_dll(self):
+        self.api = WinDLL(self.dll_path)
+
+    def _define_functions(self):
+        self.api.SteamEncryptedAppTicket_BDecryptTicket.argtypes = [
+            POINTER(c_ubyte),  # encrypted ticket
+            c_uint32,  # ticket size
+            POINTER(c_ubyte),  # output buffer
+            POINTER(c_uint32),  # output size
+            POINTER(c_ubyte),  # key
+            c_int,  # key length
+        ]
+        self.api.SteamEncryptedAppTicket_BDecryptTicket.restype = c_bool
+
+        self.api.SteamEncryptedAppTicket_GetTicketSteamID.argtypes = [
+            POINTER(c_ubyte),
+            c_uint32,
+            POINTER(c_uint64),
+        ]
+        self.api.SteamEncryptedAppTicket_GetTicketSteamID.restype = None
+
+        self.api.SteamEncryptedAppTicket_BIsTicketForApp.argtypes = [
+            POINTER(c_ubyte),
+            c_uint32,
+            c_uint32,
+        ]
+        self.api.SteamEncryptedAppTicket_BIsTicketForApp.restype = c_bool
+
+        self.api.SteamEncryptedAppTicket_GetUserVariableData.argtypes = [
+            POINTER(c_ubyte),
+            c_uint32,
+            POINTER(c_uint32),
+        ]
+        self.api.SteamEncryptedAppTicket_GetUserVariableData.restype = POINTER(c_ubyte)
+
+    def decrypt_ticket(self, encrypted_ticket: Union[bytes, str]) -> bytes:
+        if isinstance(encrypted_ticket, str):
+            encrypted_ticket = bytes.fromhex(encrypted_ticket)
+
+        ticket_len = c_uint32(len(encrypted_ticket))
+        encrypted_buf = (c_ubyte * ticket_len.value).from_buffer_copy(encrypted_ticket)
+        decrypted_buf = (c_ubyte * 1024)()
+        decrypted_len = c_uint32(1024)
+
+        key_buf = (c_ubyte * 32).from_buffer_copy(self.key)
+
+        success = self.api.SteamEncryptedAppTicket_BDecryptTicket(
+            encrypted_buf,
+            ticket_len,
+            decrypted_buf,
+            byref(decrypted_len),
+            key_buf,
+            32,
+        )
+
+        if not success:
+            raise RuntimeError("Failed to decrypt ticket")
+
+        return bytes(decrypted_buf[: decrypted_len.value])
+    
+    def is_ticket_for_app(self, decrypted_ticket: bytes) -> bool:
+        buf = (c_ubyte * len(decrypted_ticket)).from_buffer_copy(decrypted_ticket)
+        return self.api.SteamEncryptedAppTicket_BIsTicketForApp(
+            buf, len(decrypted_ticket), int(self.app_id)
+        )
+
+    def get_ticket_steam_id(self, decrypted_ticket: bytes) -> int:
+        buf = (c_ubyte * len(decrypted_ticket)).from_buffer_copy(decrypted_ticket)
+        steam_id = c_uint64()
+        self.api.SteamEncryptedAppTicket_GetTicketSteamID(
+            buf, len(decrypted_ticket), byref(steam_id)
+        )
+        return steam_id.value
+
+    def get_user_variable_data(self, decrypted_ticket: bytes) -> bytes:
+        buf = (c_ubyte * len(decrypted_ticket)).from_buffer_copy(decrypted_ticket)
+        data_len = c_uint32()
+        ptr = self.api.SteamEncryptedAppTicket_GetUserVariableData(
+            buf, len(decrypted_ticket), byref(data_len)
+        )
+        return bytes(ptr[:data_len.value]) if ptr and data_len.value > 0 else b""
+
+    def validate_ticket(self, decrypted_ticket: bytes, expected_user_id: int):
+        if not decrypted_ticket:
+            raise ValueError("Ticket failed to decrypt!")
+        
+        if not self.is_ticket_for_app(decrypted_ticket):
+            raise ValueError("Ticket is not for the expected App ID")
+
+        actual_user_id = self.get_ticket_steam_id(decrypted_ticket)
+        if actual_user_id != expected_user_id:
+            raise ValueError(f"SteamID mismatch: expected {expected_user_id}, got {actual_user_id}")
+
+        return self.app_id, actual_user_id
 
 # Example usage
 if __name__ == "__main__":
