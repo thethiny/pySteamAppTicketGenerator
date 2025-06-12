@@ -13,7 +13,7 @@ from ctypes import (
     c_void_p,
 )
 from enum import IntEnum
-from typing import Type
+from typing import Type, Union
 
 
 class EncryptedAppTicketResponse_t(Structure):
@@ -30,7 +30,7 @@ class EResult(IntEnum):
 
 
 class SteamAppTicket:
-    def __init__(self, app_id: str = "", dll_path: str = ""):
+    def __init__(self, app_id: Union[str, int] = "", dll_path: str = ""):
         self.dll_path = dll_path or os.path.join(os.getcwd(), "steam_api64.dll")
         self.api: WinDLL
         self.h_user = None
@@ -44,7 +44,7 @@ class SteamAppTicket:
         if app_id:
             try:
                 with open("steam_appid.txt", "w") as f:
-                    f.write(app_id)
+                    f.write(str(app_id))
                 self.used_app_id = True
             except Exception:
                 raise ValueError("Couldn't generate App Id. If steam_appid is open, please close it.")
@@ -52,11 +52,16 @@ class SteamAppTicket:
         self.init = False
 
     def initialize_apis(self):
+        if self.init:
+            return self
+        
         self._load_dll()
         self._init_steam()
         self._get_interfaces()
         self._define_functions()
         self.init = True
+        
+        return self # For chaining
 
     def _load_dll(self):
         self.api = WinDLL(self.dll_path)
@@ -203,6 +208,8 @@ class SteamAppTicket:
             raise RuntimeError(f"Steam Login Failed: {request_state.name}")
         logging.getLogger("SteamAppTicket").info("Ticket Received")
         self.ticket_requested = True
+        
+        return self # Chaining
 
     def request_encrypted_app_ticket(self, data: bytes = b""):
         if not self.init:
