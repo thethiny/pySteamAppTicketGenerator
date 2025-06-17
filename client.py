@@ -1,7 +1,7 @@
 import logging
 import os
 import time
-from ctypes import POINTER, byref, c_ubyte, cast, create_string_buffer, sizeof
+from ctypes import POINTER, byref, c_ubyte, cast, create_string_buffer, sizeof, windll, wintypes
 from ctypes import (
     Structure,
     WinDLL,
@@ -278,6 +278,15 @@ class SteamAppTicket:
                 self.api.SteamAPI_Shutdown()
             except Exception:
                 pass
+
+            try:
+                windll.kernel32.FreeLibrary.argtypes = [wintypes.HMODULE]
+                windll.kernel32.FreeLibrary(self.api._handle)
+            except Exception:
+                pass
+
+            del self.api
+
 
 class SteamTicketDecryptor:
     def __init__(self, app_id: Union[str, int] = "", dll_path: str = "", key = b""):
