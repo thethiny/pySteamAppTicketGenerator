@@ -273,7 +273,7 @@ class SteamAppTicket:
             except Exception:
                 pass
 
-        if self.api:
+        if getattr(self, "app", False):
             try:
                 self.api.SteamAPI_Shutdown()
             except Exception:
